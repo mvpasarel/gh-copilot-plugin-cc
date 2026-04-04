@@ -1,0 +1,14 @@
+{
+  "name": "gh-copilot-plugin-cc",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "GitHub Copilot plugin for Claude Code — code review, adversarial review, and task delegation via GPT-5.4.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

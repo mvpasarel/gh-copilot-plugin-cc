@@ -1,0 +1,21 @@
+{
+  "name": "mvpasarel-copilot",
+  "owner": {
+    "name": "Mădălin Păsărel"
+  },
+  "metadata": {
+    "description": "GitHub Copilot plugin for Claude Code — code review, adversarial review, and task delegation via GPT-5.4.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "copilot",
+      "description": "Use Copilot from Claude Code to review code or delegate tasks.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Mădălin Păsărel"
+      },
+      "source": "./plugins/copilot"
+    }
+  ]
+}
