@@ -371,7 +371,7 @@ If you have not used the Copilot CLI before, run `copilot login` to authenticate
 
 ### How many premium requests does this use?
 
-Each review, adversarial review, rescue, ask, task, or plan command uses exactly 1 Copilot premium request. Setup, status, result, and cancel use 0. The optional review gate uses 1 per stop.
+Each review, adversarial review, ask, task, plan, review-plan, adversarial-plan-review, and rescue command uses exactly 1 Copilot premium request. Setup, status, result, and cancel use 0. The optional review gate uses 1 per stop.
 
 ## License
 
