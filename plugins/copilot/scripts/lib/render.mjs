@@ -417,6 +417,108 @@ export function renderStoredJobResult(job, storedJob) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+export function renderPlanResult(parsedResult, meta) {
+  if (!parsedResult.parsed) {
+    const lines = [
+      "# Copilot Plan",
+      "",
+      "Copilot did not return valid structured JSON.",
+      "",
+      `- Parse error: ${parsedResult.parseError}`
+    ];
+    if (parsedResult.rawOutput) {
+      lines.push("", "Raw output:", "", "```text", parsedResult.rawOutput, "```");
+    }
+    appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+
+  const data = parsedResult.parsed;
+  const lines = [
+    "# Copilot Plan",
+    "",
+    `Verdict: ${data.verdict}`,
+    "",
+    data.summary,
+    ""
+  ];
+
+  if (data.steps.length === 0) {
+    lines.push("No steps generated.");
+  } else {
+    lines.push("Steps:");
+    for (const step of data.steps) {
+      const sizeSuffix = step.estimated_size ? ` (${step.estimated_size})` : "";
+      lines.push(`${step.order}. **${step.title}**${sizeSuffix}`);
+      lines.push(`   ${step.description}`);
+      if (step.files?.length) {
+        lines.push(`   Files: ${step.files.join(", ")}`);
+      }
+    }
+  }
+
+  if (data.risks?.length) {
+    lines.push("", "Risks:");
+    for (const risk of data.risks) lines.push(`- ${risk}`);
+  }
+
+  if (data.open_questions?.length) {
+    lines.push("", "Open Questions:");
+    for (const q of data.open_questions) lines.push(`- ${q}`);
+  }
+
+  appendReasoningSection(lines, meta.reasoningSummary);
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export function renderPlanReviewResult(parsedResult, meta) {
+  if (!parsedResult.parsed) {
+    const lines = [
+      `# Copilot ${meta.reviewLabel}`,
+      "",
+      "Copilot did not return valid structured JSON.",
+      "",
+      `- Parse error: ${parsedResult.parseError}`
+    ];
+    if (parsedResult.rawOutput) {
+      lines.push("", "Raw output:", "", "```text", parsedResult.rawOutput, "```");
+    }
+    appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+
+  const data = parsedResult.parsed;
+  const findings = [...(data.findings ?? [])].sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
+  const lines = [
+    `# Copilot ${meta.reviewLabel}`,
+    "",
+    `Verdict: ${data.verdict}`,
+    "",
+    data.summary,
+    ""
+  ];
+
+  if (findings.length === 0) {
+    lines.push("No material findings.");
+  } else {
+    lines.push("Findings:");
+    for (const f of findings) {
+      const stepSuffix = f.step_ref ? ` (step: "${f.step_ref}")` : "";
+      lines.push(`- [${f.severity}] ${f.title}${stepSuffix}`);
+      lines.push(`  ${f.body}`);
+      if (f.recommendation) lines.push(`  Recommendation: ${f.recommendation}`);
+    }
+  }
+
+  if (data.next_steps?.length) {
+    lines.push("", "Next steps:");
+    for (const s of data.next_steps) lines.push(`- ${s}`);
+  }
+
+  appendReasoningSection(lines, meta.reasoningSummary);
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
 export function renderCancelReport(job) {
   const lines = [
     "# Copilot Cancel",

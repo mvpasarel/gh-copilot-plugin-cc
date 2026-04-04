@@ -21,7 +21,7 @@ import {
     runCopilotTurn
   } from "./lib/copilot.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { collectPlanContext, collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -52,6 +52,8 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
+  renderPlanResult,
+  renderPlanReviewResult,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -63,6 +65,8 @@ import {
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
+const PLAN_SCHEMA = path.join(ROOT_DIR, "schemas", "plan-output.schema.json");
+const PLAN_REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "plan-review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
@@ -77,6 +81,10 @@ function printUsage() {
       "  node scripts/copilot-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/copilot-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/copilot-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <low|medium|high|xhigh>] [prompt]",
+      "  node scripts/copilot-companion.mjs ask [--model <model>] [--effort <low|medium|high|xhigh>] <question>",
+      "  node scripts/copilot-companion.mjs plan [--background] [--prompt-file <path>] [--model <model>] [--effort <low|medium|high|xhigh>] <description>",
+      "  node scripts/copilot-companion.mjs review-plan [--background] [--plan-file <path>] [--model <model>] [--effort <low|medium|high|xhigh>] [plan text]",
+      "  node scripts/copilot-companion.mjs adversarial-plan-review [--background] --plan-file <path> [--focus <angle>] [--model <model>] [--effort <low|medium|high|xhigh>]",
       "  node scripts/copilot-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/copilot-companion.mjs result [job-id] [--json]",
       "  node scripts/copilot-companion.mjs cancel [job-id] [--json]"
@@ -489,8 +497,11 @@ function renderQueuedTaskLaunch(payload) {
 }
 
 function getJobKindLabel(kind, jobClass) {
-  if (kind === "adversarial-review") {
-    return "adversarial-review";
+  if (kind === "adversarial-review" || kind === "adversarial-plan-review") {
+    return kind;
+  }
+  if (kind === "plan" || kind === "plan-review") {
+    return kind;
   }
   return jobClass === "review" ? "review" : "rescue";
 }
@@ -662,6 +673,32 @@ async function handleReview(argv) {
   });
 }
 
+async function handleAsk(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["model", "effort", "cwd"],
+    booleanOptions: ["json"],
+    aliasMap: { m: "model" }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const model = normalizeRequestedModel(options.model);
+  const effort = normalizeReasoningEffort(options.effort);
+  const prompt = positionals.join(" ").trim();
+
+  if (!prompt) {
+    throw new Error("Provide a question after `/copilot:ask`.");
+  }
+
+  const taskMetadata = buildTaskRunMetadata({ prompt, resumeLast: false });
+  const job = buildTaskJob(workspaceRoot, taskMetadata, false);
+  await runForegroundCommand(
+    job,
+    (progress) => executeTaskRun({ cwd, model, effort, prompt, write: false, resumeLast: false, jobId: job.id, onProgress: progress }),
+    { json: options.json }
+  );
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
@@ -755,6 +792,13 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
+  const executor =
+    storedJob.kind === "plan"
+      ? executePlanRun
+      : storedJob.kind === "plan-review" || storedJob.kind === "adversarial-plan-review"
+      ? executePlanReviewRun
+      : executeTaskRun;
+
   await runTrackedJob(
     {
       ...storedJob,
@@ -762,7 +806,7 @@ async function handleTaskWorker(argv) {
       logFile
     },
     () =>
-      executeTaskRun({
+      executor({
         ...request,
         onProgress: progress
       }),
@@ -858,6 +902,235 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+function buildPlanPrompt(context, userRequest) {
+  const template = loadPromptTemplate(ROOT_DIR, "plan");
+  return interpolateTemplate(template, {
+    USER_REQUEST: userRequest,
+    REPO_ROOT: context.repoRoot,
+    BRANCH: context.branch,
+    CODEBASE_SUMMARY: context.summary,
+    CODEBASE_CONTEXT: context.content
+  });
+}
+
+function buildPlanReviewPrompt(planContent, context) {
+  const template = loadPromptTemplate(ROOT_DIR, "review-plan");
+  return interpolateTemplate(template, {
+    PLAN_CONTENT: planContent,
+    REPO_ROOT: context.repoRoot,
+    BRANCH: context.branch,
+    CODEBASE_SUMMARY: context.summary,
+    CODEBASE_CONTEXT: context.content
+  });
+}
+
+function buildAdversarialPlanReviewPrompt(planContent, context, focusText) {
+  const template = loadPromptTemplate(ROOT_DIR, "adversarial-plan-review");
+  return interpolateTemplate(template, {
+    PLAN_CONTENT: planContent,
+    USER_FOCUS: focusText || "No extra focus provided.",
+    REPO_ROOT: context.repoRoot,
+    BRANCH: context.branch,
+    CODEBASE_SUMMARY: context.summary,
+    CODEBASE_CONTEXT: context.content
+  });
+}
+
+async function executePlanRun(request) {
+  ensureCopilotReady(request.cwd);
+
+  let planContext;
+  try {
+    ensureGitRepository(request.cwd);
+    planContext = collectPlanContext(request.cwd);
+  } catch {
+    planContext = { repoRoot: request.cwd, branch: "unknown", summary: "No git context available.", content: "" };
+  }
+
+  const prompt = buildPlanPrompt(planContext, request.prompt);
+  const result = await runCopilotTurn(planContext.repoRoot, {
+    prompt,
+    model: request.model,
+    effort: request.effort ?? "high",
+    outputSchema: readOutputSchema(PLAN_SCHEMA),
+    onProgress: request.onProgress,
+    sandbox: "read-only"
+  });
+
+  const parsed = parseStructuredOutput(result.finalMessage, {
+    status: result.status,
+    failureMessage: result.error?.message ?? result.stderr
+  });
+
+  const payload = {
+    kind: "plan",
+    threadId: result.threadId,
+    request: request.prompt,
+    result: parsed.parsed,
+    rawOutput: parsed.rawOutput,
+    parseError: parsed.parseError,
+    reasoningSummary: result.reasoningSummary
+  };
+
+  return {
+    exitStatus: result.status,
+    threadId: result.threadId,
+    turnId: result.turnId,
+    payload,
+    rendered: renderPlanResult(parsed, { reasoningSummary: result.reasoningSummary }),
+    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, "Plan generated."),
+    jobTitle: "Copilot Plan",
+    jobClass: "plan"
+  };
+}
+
+async function executePlanReviewRun(request) {
+  ensureCopilotReady(request.cwd);
+
+  let planContext;
+  try {
+    ensureGitRepository(request.cwd);
+    planContext = collectPlanContext(request.cwd);
+  } catch {
+    planContext = { repoRoot: request.cwd, branch: "unknown", summary: "No git context available.", content: "" };
+  }
+
+  const prompt = request.adversarial
+    ? buildAdversarialPlanReviewPrompt(request.planContent, planContext, request.focusText ?? "")
+    : buildPlanReviewPrompt(request.planContent, planContext);
+
+  const reviewLabel = request.adversarial ? "Adversarial Plan Review" : "Plan Review";
+
+  const result = await runCopilotTurn(planContext.repoRoot, {
+    prompt,
+    model: request.model,
+    effort: request.effort ?? "high",
+    outputSchema: readOutputSchema(PLAN_REVIEW_SCHEMA),
+    onProgress: request.onProgress,
+    sandbox: "read-only"
+  });
+
+  const parsed = parseStructuredOutput(result.finalMessage, {
+    status: result.status,
+    failureMessage: result.error?.message ?? result.stderr
+  });
+
+  const payload = {
+    kind: request.adversarial ? "adversarial-plan-review" : "plan-review",
+    threadId: result.threadId,
+    result: parsed.parsed,
+    rawOutput: parsed.rawOutput,
+    parseError: parsed.parseError,
+    reasoningSummary: result.reasoningSummary
+  };
+
+  return {
+    exitStatus: result.status,
+    threadId: result.threadId,
+    turnId: result.turnId,
+    payload,
+    rendered: renderPlanReviewResult(parsed, { reviewLabel, reasoningSummary: result.reasoningSummary }),
+    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewLabel} finished.`),
+    jobTitle: `Copilot ${reviewLabel}`,
+    jobClass: "plan-review"
+  };
+}
+
+function readPlanContent(cwd, options, positionals) {
+  if (options["plan-file"]) {
+    return fs.readFileSync(path.resolve(cwd, options["plan-file"]), "utf8");
+  }
+  const positionalText = positionals.join(" ");
+  return positionalText || readStdinIfPiped();
+}
+
+async function handlePlan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    booleanOptions: ["json", "background", "wait"],
+    aliasMap: { m: "model" }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const model = normalizeRequestedModel(options.model);
+  const effort = normalizeReasoningEffort(options.effort);
+  const prompt = readTaskPrompt(cwd, options, positionals);
+
+  if (!prompt) {
+    throw new Error("Provide a description of what to build after `/copilot:plan`.");
+  }
+
+  const job = createCompanionJob({
+    prefix: "plan",
+    kind: "plan",
+    title: "Copilot Plan",
+    workspaceRoot,
+    jobClass: "plan",
+    summary: shorten(prompt)
+  });
+
+  if (options.background) {
+    ensureCopilotReady(cwd);
+    const request = { cwd, model, effort, prompt, jobId: job.id };
+    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
+  await runForegroundCommand(
+    job,
+    (progress) => executePlanRun({ cwd, model, effort, prompt, jobId: job.id, onProgress: progress }),
+    { json: options.json }
+  );
+}
+
+async function handlePlanReview(argv, config = {}) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["model", "effort", "cwd", "plan-file", "focus"],
+    booleanOptions: ["json", "background", "wait"],
+    aliasMap: { m: "model" }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const model = normalizeRequestedModel(options.model);
+  const effort = normalizeReasoningEffort(options.effort);
+  const hasPlanFile = Boolean(options["plan-file"]);
+  const focusText = config.adversarial
+    ? (options.focus || (hasPlanFile ? positionals.join(" ").trim() : ""))
+    : null;
+  const planContent = readPlanContent(cwd, options, (config.adversarial && hasPlanFile) ? [] : positionals);
+
+  if (!planContent) {
+    throw new Error("Provide a plan via positional arguments, --plan-file <path>, or stdin.");
+  }
+
+  const reviewLabel = config.adversarial ? "Adversarial Plan Review" : "Plan Review";
+  const job = createCompanionJob({
+    prefix: "plan-review",
+    kind: config.adversarial ? "adversarial-plan-review" : "plan-review",
+    title: `Copilot ${reviewLabel}`,
+    workspaceRoot,
+    jobClass: "plan-review",
+    summary: `${reviewLabel} of provided plan`
+  });
+
+  if (options.background) {
+    ensureCopilotReady(cwd);
+    const request = { cwd, model, effort, planContent, focusText, adversarial: Boolean(config.adversarial), jobId: job.id };
+    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
+  await runForegroundCommand(
+    job,
+    (progress) => executePlanReviewRun({ cwd, model, effort, planContent, focusText, adversarial: Boolean(config.adversarial), jobId: job.id, onProgress: progress }),
+    { json: options.json }
+  );
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -922,11 +1195,23 @@ async function main() {
         reviewName: "Adversarial Review"
       });
       break;
+    case "ask":
+      await handleAsk(argv);
+      break;
     case "task":
       await handleTask(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);
+      break;
+    case "plan":
+      await handlePlan(argv);
+      break;
+    case "review-plan":
+      await handlePlanReview(argv, { adversarial: false });
+      break;
+    case "adversarial-plan-review":
+      await handlePlanReview(argv, { adversarial: true });
       break;
     case "status":
       await handleStatus(argv);

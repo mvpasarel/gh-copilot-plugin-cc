@@ -187,6 +187,19 @@ function collectBranchContext(cwd, baseRef) {
   };
 }
 
+export function collectPlanContext(cwd) {
+  const repoRoot = getRepoRoot(cwd);
+  const branch = getCurrentBranch(cwd);
+  const status = gitChecked(cwd, ["status", "--short"]).stdout.trim();
+  const fileList = gitChecked(cwd, ["ls-files"]).stdout.trim().split("\n").filter(Boolean).slice(0, 150);
+  const summary = `${fileList.length} tracked file(s) on branch ${branch}.`;
+  const content = [
+    `## Git Status\n\n${status || "(clean)"}`,
+    `## Tracked Files\n\n${fileList.join("\n")}`
+  ].join("\n\n");
+  return { repoRoot, branch, summary, content };
+}
+
 export function collectReviewContext(cwd, target) {
   const repoRoot = getRepoRoot(cwd);
   const state = getWorkingTreeState(cwd);
