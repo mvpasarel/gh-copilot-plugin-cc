@@ -11,6 +11,10 @@ Each slash command costs at most 1 Copilot premium request. Status, result, canc
 - `/copilot:review` for a native Copilot code review
 - `/copilot:adversarial-review` for a steerable challenge review with structured findings
 - `/copilot:rescue`, `/copilot:status`, `/copilot:result`, and `/copilot:cancel` to delegate work and manage background jobs
+- `/copilot:ask` for quick one-shot questions
+- `/copilot:task` for delegating agentic tasks (foreground or background)
+- `/copilot:plan` for generating structured implementation plans
+- `/copilot:review-plan` and `/copilot:adversarial-plan-review` for reviewing plans
 
 ## Requirements
 
@@ -65,6 +69,14 @@ One simple first run is:
 /copilot:status
 /copilot:result
 ```
+
+## Update
+
+```bash
+claude plugin update copilot@mvpasarel-copilot
+```
+
+Then restart Claude Code to apply.
 
 ## Usage
 
@@ -172,6 +184,75 @@ Ask Copilot to redesign the database connection to be more resilient.
 - if you do not pass `--effort`, Copilot uses its default
 - follow-up rescue requests can continue the latest Copilot session in the repo
 
+### `/copilot:ask`
+
+One-shot foreground question to Copilot. Read-only, always foreground.
+
+Supports `--model` and `--effort`.
+
+Examples:
+
+```bash
+/copilot:ask what does the auth middleware do
+/copilot:ask explain the retry logic in lib/http.mjs
+```
+
+Costs 1 premium request.
+
+### `/copilot:task`
+
+Delegate an agentic task to Copilot. Without `--write`, tasks run in a read-only sandbox.
+
+Supports `--background`, `--write`, `--resume`, `--fresh`, `--model`, and `--effort`.
+
+Examples:
+
+```bash
+/copilot:task refactor the error handling in lib/api.mjs
+/copilot:task --background --write implement input validation for the signup form
+```
+
+Costs 1 premium request.
+
+### `/copilot:plan`
+
+Generate a structured implementation plan with steps, risks, and open questions. The output includes a verdict (`ready` or `needs-clarification`), ordered steps with file lists, risks, and open questions.
+
+Supports `--background`, `--prompt-file`, `--model`, and `--effort`.
+
+Examples:
+
+```bash
+/copilot:plan add WebSocket support to the notification system
+/copilot:plan --prompt-file feature-spec.md
+```
+
+Costs 1 premium request.
+
+### `/copilot:review-plan`
+
+Review a plan for correctness, completeness, ordering, and feasibility. Plan content can be provided via positional args, `--plan-file <path>`, or stdin.
+
+Supports `--background`, `--model`, and `--effort`.
+
+Examples:
+
+```bash
+/copilot:review-plan --plan-file plan.md
+/copilot:review-plan the plan is to add a caching layer in front of the database
+```
+
+### `/copilot:adversarial-plan-review`
+
+Challenge a plan's assumptions, missing steps, and hidden dependencies. Plan content can be provided via `--plan-file <path>` or positional args. Use `--focus <angle>` with `--plan-file` to specify the adversarial angle.
+
+Examples:
+
+```bash
+/copilot:adversarial-plan-review --plan-file plan.md
+/copilot:adversarial-plan-review --plan-file plan.md --focus "what if the cache goes down"
+```
+
 ### `/copilot:status`
 
 Shows running and recent Copilot jobs for the current repository.
@@ -240,6 +321,26 @@ Then check in with:
 /copilot:result
 ```
 
+### Quick Question
+
+```bash
+/copilot:ask what's the purpose of the retry logic in lib/http.mjs
+```
+
+### Plan Before Building
+
+```bash
+/copilot:plan add rate limiting to the API endpoints
+```
+
+### Delegate A Task
+
+```bash
+/copilot:task --background --write refactor the database connection pool
+/copilot:status
+/copilot:result
+```
+
 ## Architecture
 
 ```
@@ -270,7 +371,7 @@ If you have not used the Copilot CLI before, run `copilot login` to authenticate
 
 ### How many premium requests does this use?
 
-Each review, adversarial review, or rescue command uses exactly 1 Copilot premium request. Setup, status, result, and cancel use 0. The optional review gate uses 1 per stop.
+Each review, adversarial review, rescue, ask, task, or plan command uses exactly 1 Copilot premium request. Setup, status, result, and cancel use 0. The optional review gate uses 1 per stop.
 
 ## License
 
