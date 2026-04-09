@@ -6,7 +6,7 @@
  * parses JSONL stdout, and returns.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { readJsonFile } from "./fs.mjs";
@@ -56,8 +56,14 @@ export function getCopilotAvailability(cwd) {
 /**
  * Check whether the Copilot CLI is installed *and* authenticated.
  *
- * The CLI has no `--status` flag, so we read `~/.copilot/config.json`
- * directly and look for `copilot_tokens` + `logged_in_users`.
+ * The CLI checks credentials in this order:
+ *   1. COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN env vars
+ *   2. OAuth token from the system keychain (macOS Keychain, Windows
+ *      Credential Manager, Linux libsecret) under service "copilot-cli"
+ *   3. GitHub CLI (`gh auth token`) fallback
+ *   4. copilot_tokens in ~/.copilot/config.json (plaintext fallback)
+ *
+ * We mirror that order here so auth is detected regardless of storage method.
  */
 export function getCopilotLoginStatus(cwd) {
   const availability = getCopilotAvailability(cwd);
@@ -67,14 +73,40 @@ export function getCopilotLoginStatus(cwd) {
 
   const configPath = path.join(os.homedir(), ".copilot", "config.json");
   const config = safeReadJson(configPath);
-  if (!config) {
-    return { available: true, loggedIn: false, detail: "no config found — run `copilot login`" };
+  const users = config?.logged_in_users ?? [];
+  const login = users[0]?.login ?? "unknown";
+
+  // 1. Environment variables
+  const envToken =
+    process.env.COPILOT_GITHUB_TOKEN ??
+    process.env.GH_TOKEN ??
+    process.env.GITHUB_TOKEN;
+  if (envToken) {
+    return { available: true, loggedIn: true, detail: `authenticated via env (${login})` };
   }
 
-  const tokens = config.copilot_tokens ?? {};
-  const users = config.logged_in_users ?? [];
+  // 2. System keychain (macOS)
+  if (os.platform() === "darwin" && hasKeychainToken()) {
+    return {
+      available: true,
+      loggedIn: true,
+      detail: `authenticated as ${login} (keychain)`
+    };
+  }
+
+  // 3. GitHub CLI fallback
+  if (hasGhCliToken()) {
+    const ghLogin = users.length > 0 ? login : getGhCliLogin();
+    return {
+      available: true,
+      loggedIn: true,
+      detail: `authenticated as ${ghLogin} (gh cli)`
+    };
+  }
+
+  // 4. Plaintext tokens in config.json
+  const tokens = config?.copilot_tokens ?? {};
   if (Object.keys(tokens).length > 0 && users.length > 0) {
-    const login = users[0].login ?? "unknown";
     return { available: true, loggedIn: true, detail: `authenticated as ${login}` };
   }
 
@@ -391,6 +423,50 @@ export function interruptCopilotProcess(pid) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Check macOS Keychain for a copilot-cli credential.
+ */
+function hasKeychainToken() {
+  try {
+    execFileSync("security", ["find-generic-password", "-s", "copilot-cli", "-w"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check whether `gh auth token` returns a valid token.
+ */
+function hasGhCliToken() {
+  try {
+    const out = execFileSync("gh", ["auth", "token"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000
+    }).toString().trim();
+    return out.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the logged-in username from `gh` CLI.
+ */
+function getGhCliLogin() {
+  try {
+    return execFileSync("gh", ["api", "user", "--jq", ".login"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000
+    }).toString().trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 function safeReadJson(filePath) {
   try {
